@@ -2,7 +2,7 @@
 
 A collection of published tools adapted for batch processing of intrinsically disordered protein sequences.
 
-## GIN Cluster Calculator
+## GIN Cluster Calculator - gin_group.py
 
 Assigns IDP sequences to GIN (Grammers in NARDINI+) clusters based on compositional and patterning features.
 
