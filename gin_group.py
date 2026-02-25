@@ -305,8 +305,8 @@ Examples:
                         help='Single FASTA sequence to analyze')
     parser.add_argument('-sheet', type=str, metavar='CSV_FILE',
                         help='CSV file with seq_name and fasta columns')
-    parser.add_argument('-output', type=str, required=True, metavar='OUTPUT_CSV',
-                        help='Output CSV file path')
+    parser.add_argument('-output', type=str, metavar='OUTPUT_CSV',
+                        help='Output CSV file path (if not provided, appends to input CSV for -sheet mode)')
     parser.add_argument('-n_cpus', type=int, default=cpu_count()-1, metavar='N',
                         help=f'Number of CPUs for parallel processing (default: {cpu_count()-1})')
     
@@ -317,6 +317,8 @@ Examples:
         parser.error('Either -single or -sheet must be provided')
     if args.single and args.sheet:
         parser.error('Cannot use both -single and -sheet')
+    if args.single and not args.output:
+        parser.error('-output is required when using -single mode')
     
     # Load reference data
     print("Loading reference data...")
@@ -381,9 +383,21 @@ Examples:
                 result_final[name] = result[f'z_{i}']
             results_final.append(result_final)
         
-        df = pd.DataFrame(results_final)
-        df.to_csv(args.output, index=False)
-        print(f"\nResults saved to {args.output}")
+        df_results = pd.DataFrame(results_final)
+        
+        # Determine output file
+        if args.output:
+            output_file = args.output
+            df_results.to_csv(output_file, index=False)
+            print(f"\nResults saved to {output_file}")
+        else:
+            # Append to input CSV
+            output_file = args.sheet
+            # Merge results with input dataframe on seq_name
+            df_merged = input_df.merge(df_results, on='seq_name', how='left')
+            df_merged.to_csv(output_file, index=False)
+            print(f"\nResults appended to {output_file}")
+        
         print(f"Successfully processed {len(results)}/{len(process_args)} sequences")
 
 

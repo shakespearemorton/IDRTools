@@ -15,6 +15,9 @@ python gin_group.py -single MADEEKLPPGWEKRMSRSSGRVYYFNHITNASQWERPSGNQ -output re
 
 # Batch processing (CSV with seq_name and fasta columns)
 python gin_group.py -sheet input.csv -output results.csv
+
+# Batch processing - append to input CSV (no separate output file)
+python gin_group.py -sheet input.csv
 ```
 
 **Requirements:** `numpy pandas scipy localcider tqdm`
@@ -37,6 +40,9 @@ python ps_pred.py -fasta sequences.fasta -output results.csv
 
 # Batch processing from CSV
 python ps_pred.py -sheet sequences.csv -output results.csv -n_cpus 8
+
+# Batch processing - append to input CSV (no separate output file)
+python ps_pred.py -sheet sequences.csv -n_cpus 8
 ```
 
 **Input formats for CSV batch mode:**

@@ -196,8 +196,8 @@ Options:
                         help='FASTA file with sequences')
     parser.add_argument('-sheet', type=str, metavar='CSV_FILE',
                         help='CSV file with sequence/fasta column and seq_name or (Uniprot, Start Pos, End Pos) columns')
-    parser.add_argument('-output', type=str, required=True, metavar='OUTPUT_CSV',
-                        help='Output CSV file path')
+    parser.add_argument('-output', type=str, metavar='OUTPUT_CSV',
+                        help='Output CSV file path (if not provided, appends to input CSV for -sheet mode)')
     parser.add_argument('-charge_termini', type=bool, default=True, metavar='BOOL',
                         help='Include terminal charges (default: True)')
     parser.add_argument('-n_cpus', type=int, default=cpu_count()-1, metavar='N',
@@ -211,6 +211,8 @@ Options:
         parser.error('One of -single, -fasta, or -sheet must be provided')
     if mode_count > 1:
         parser.error('Only one of -single, -fasta, or -sheet can be used')
+    if (args.single or args.fasta) and not args.output:
+        parser.error('-output is required when using -single or -fasta mode')
     
     # Load models
     models, residues, nu_file = load_models_and_data()
@@ -243,6 +245,8 @@ Options:
     
     else:  # Batch mode
         # Load sequences
+        uniprot_metadata = {}  # Store Uniprot, Start Pos, End Pos if present
+        
         if args.fasta:
             print(f"Loading sequences from {args.fasta}...")
             sequences = read_fasta(args.fasta)
@@ -260,12 +264,30 @@ Options:
                 print("Error: Input CSV must have 'sequence' or 'fasta' column")
                 sys.exit(1)
             
+            # Check if Uniprot columns are present
+            has_uniprot = all(col in input_df.columns for col in ['Uniprot', 'Start Pos', 'End Pos'])
+            
             # Handle flexible seq_name or generate from Uniprot + positions
             if 'seq_name' in input_df.columns:
                 seq_names = input_df['seq_name'].tolist()
-            elif all(col in input_df.columns for col in ['Uniprot', 'Start Pos', 'End Pos']):
-                seq_names = [f"{row['Uniprot']}_{row['Start Pos']}_{row['End Pos']}" 
-                            for _, row in input_df.iterrows()]
+                # Store Uniprot metadata if present
+                if has_uniprot:
+                    for _, row in input_df.iterrows():
+                        uniprot_metadata[row['seq_name']] = {
+                            'Uniprot': row['Uniprot'],
+                            'Start Pos': row['Start Pos'],
+                            'End Pos': row['End Pos']
+                        }
+            elif has_uniprot:
+                seq_names = []
+                for _, row in input_df.iterrows():
+                    name = f"{row['Uniprot']}_{row['Start Pos']}_{row['End Pos']}"
+                    seq_names.append(name)
+                    uniprot_metadata[name] = {
+                        'Uniprot': row['Uniprot'],
+                        'Start Pos': row['Start Pos'],
+                        'End Pos': row['End Pos']
+                    }
                 print("Generated seq_name from Uniprot_StartPos_EndPos")
             else:
                 print("Error: Input CSV must have either 'seq_name' column or 'Uniprot', 'Start Pos', 'End Pos' columns")
@@ -279,62 +301,98 @@ Options:
         process_args = [(name, seq, models, residues, nu_file, args.charge_termini) 
                        for name, seq in sequences.items()]
         
-        # Process in parallel
+        # Determine output file and mode
+        if args.output:
+            output_file = args.output
+            append_mode = False
+        else:
+            # Append to input CSV
+            output_file = args.sheet
+            append_mode = True
+        
+        # Initialize output file with header
+        header_written = False
+        n_processed = 0
+        n_failed = 0
+        all_results = []
+        
+        # Process in parallel with incremental saving
         with Pool(args.n_cpus) as pool:
-            results = list(tqdm(pool.imap(process_sequence_batch, process_args), 
-                              total=len(process_args), desc="Predicting"))
+            for result in tqdm(pool.imap(process_sequence_batch, process_args), 
+                              total=len(process_args), desc="Predicting"):
+                
+                if result is None:
+                    n_failed += 1
+                    continue
+                
+                # Calculate features for this sequence
+                seq_features = calculate_sequence_features(result['sequence'], residues, nu_file, args.charge_termini)
+                
+                output_row = {
+                    'seq_name': result['seq_name'],
+                    'sequence': result['sequence']
+                }
+                
+                # Add Uniprot metadata if present
+                if result['seq_name'] in uniprot_metadata:
+                    output_row['Uniprot'] = uniprot_metadata[result['seq_name']]['Uniprot']
+                    output_row['Start Pos'] = uniprot_metadata[result['seq_name']]['Start Pos']
+                    output_row['End Pos'] = uniprot_metadata[result['seq_name']]['End Pos']
+                
+                # Add prediction results
+                output_row.update({
+                    'dG_kT': result['dG'],
+                    'dG_kT_lower': result['dG_lower'],
+                    'dG_kT_upper': result['dG_upper'],
+                    'cdil_mgml': result['cdil_mgml'],
+                    'cdil_mgml_lower': result['cdil_mgml_lower'],
+                    'cdil_mgml_upper': result['cdil_mgml_upper'],
+                    'cdil_uM': result['cdil_uM'],
+                    'cdil_uM_lower': result['cdil_uM_lower'],
+                    'cdil_uM_upper': result['cdil_uM_upper'],
+                    'mw_kDa': seq_features['mw'],
+                    'mean_lambda': seq_features['mean_lambda'],
+                    'faro': seq_features['faro'],
+                    'shd': seq_features['shd'],
+                    'ncpr': seq_features['ncpr'],
+                    'fcr': seq_features['fcr'],
+                    'scd': seq_features['scd'],
+                    'ah_ij': seq_features['ah_ij'],
+                    'nu_svr': seq_features['nu_svr']
+                })
+                
+                if append_mode:
+                    # Store results for merging later
+                    all_results.append(output_row)
+                else:
+                    # Write to CSV incrementally (original behavior)
+                    df_row = pd.DataFrame([output_row])
+                    if not header_written:
+                        df_row.to_csv(output_file, index=False, mode='w')
+                        header_written = True
+                    else:
+                        df_row.to_csv(output_file, index=False, mode='a', header=False)
+                
+                n_processed += 1
         
-        # Filter out failed results
-        results = [r for r in results if r is not None]
-        
-        if not results:
+        if n_processed == 0:
             print("Error: No sequences were successfully processed")
             sys.exit(1)
         
-        # Create output dataframe with all features
-        output_data = []
-        for r in results:
-            # Calculate features for this sequence
-            seq_features = calculate_sequence_features(r['sequence'], residues, nu_file, args.charge_termini)
-            
-            output_data.append({
-                'seq_name': r['seq_name'],
-                'sequence': r['sequence'],
-                'dG_kT': r['dG'],
-                'dG_kT_lower': r['dG_lower'],
-                'dG_kT_upper': r['dG_upper'],
-                'cdil_mgml': r['cdil_mgml'],
-                'cdil_mgml_lower': r['cdil_mgml_lower'],
-                'cdil_mgml_upper': r['cdil_mgml_upper'],
-                'cdil_uM': r['cdil_uM'],
-                'cdil_uM_lower': r['cdil_uM_lower'],
-                'cdil_uM_upper': r['cdil_uM_upper'],
-                'mw_kDa': seq_features['mw'],
-                'mean_lambda': seq_features['mean_lambda'],
-                'faro': seq_features['faro'],
-                'shd': seq_features['shd'],
-                'ncpr': seq_features['ncpr'],
-                'fcr': seq_features['fcr'],
-                'scd': seq_features['scd'],
-                'ah_ij': seq_features['ah_ij'],
-                'nu_svr': seq_features['nu_svr']
-            })
-        
-        df = pd.DataFrame(output_data)
-        df.to_csv(args.output, index=False)
-        
-        # Print summary table
-        print("\n" + "="*100)
-        print(f"{'Name':20s} {'Sequence':30s} {'ΔG [kT]':>10s} {'C_sat [mg/mL]':>15s} {'C_sat [uM]':>15s}")
-        print("="*100)
-        for _, row in df.iterrows():
-            seq_display = row['sequence'][:27] + '...' if len(row['sequence']) > 30 else row['sequence']
-            print(f"{row['seq_name']:20s} {seq_display:30s} {row['dG_kT']:10.1f} {row['cdil_mgml']:15.1f} {row['cdil_uM']:15.1f}")
-        print("="*100)
-        
-        print(f"\nResults saved to {args.output}")
-        print(f"Successfully processed {len(results)}/{len(sequences)} sequences")
-
+        # Handle append mode - merge with input CSV
+        if append_mode:
+            df_results = pd.DataFrame(all_results)
+            # Merge with original input dataframe
+            df_merged = input_df.merge(df_results, on='seq_name', how='left', suffixes=('', '_new'))
+            # Remove duplicate sequence column if it exists
+            if 'sequence_new' in df_merged.columns:
+                df_merged = df_merged.drop(columns=['sequence_new'])
+            df_merged.to_csv(output_file, index=False)
+            print(f"\nResults appended to {output_file}")
+        else:
+            # Read back final results for summary table
+            df = pd.read_csv(output_file)
+            print(f"\nResults saved to {output_file}")
 
 if __name__ == "__main__":
     main()
